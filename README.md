@@ -1,4 +1,4 @@
-# WeChat iLink Bot
+# WePilot
 
 **[English](README_EN.md)** | 中文
 
@@ -225,7 +225,7 @@ enabled: true
 ## 项目结构
 
 ```
-wechat-ilink-bot/
+WePilot/
 ├── bot.py                  # 主入口，消息处理管道
 ├── ilink_client.py         # iLink API 客户端（登录、收发消息）
 ├── llm_engine.py           # LLM 引擎（多模型切换、流式输出）

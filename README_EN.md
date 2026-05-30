@@ -1,4 +1,4 @@
-# WeChat iLink Bot
+# WePilot
 
 **English** | **[中文](README.md)**
 
@@ -32,7 +32,7 @@ User Message → iLink API → MessageParser → DocumentAnalyzer → LLMEngine 
 | Module | Responsibility |
 |--------|----------------|
 | `bot.py` | Main controller, event loop, message processing pipeline |
-| `ilink_client.py` | WeChat iLink API communication (login, send/receive messages, session management) |
+| `ilink_client.py` | iLink API communication (login, send/receive messages, session management) |
 | `llm_engine.py` | LLM call wrapper (OpenAI SDK compatible, multi-model switching, streaming output) |
 | `message_parser.py` | Message parsing (text extraction, attachment extraction, quoted message parsing) |
 | `document_analyzer.py` | Document parsing (multi-format text extraction, multimodal encoding, token estimation) |
@@ -225,7 +225,7 @@ Define workflow, output format, notes, etc. here.
 ## Project Structure
 
 ```
-wechat-ilink-bot/
+WePilot/
 ├── bot.py                  # Main entry, message processing pipeline
 ├── ilink_client.py         # iLink API client (login, send/receive messages)
 ├── llm_engine.py           # LLM engine (multi-model switching, streaming)
