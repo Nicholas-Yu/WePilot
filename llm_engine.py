@@ -2,7 +2,9 @@ import json
 import logging
 import math
 import os
+import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Optional
 
@@ -57,7 +59,9 @@ class LLMEngine:
         self.max_chunks = file_cfg.get("max_chunks", 24)
         self.multimodal = cfg.get("multimodal", {})
         self.system_prompt = self._build_system_prompt(cfg)
-        self._histories: dict[str, list[dict]] = {}
+        self._histories: OrderedDict[str, list[dict]] = OrderedDict()
+        self._history_lock = threading.RLock()
+        self._max_history_users = 15
 
     def _build_system_prompt(self, cfg: dict) -> str:
         custom_prompt = cfg.get("llm", {}).get("system_prompt", "")
@@ -85,21 +89,28 @@ class LLMEngine:
         return json.loads(self.config_path.read_text())
 
     def _get_history(self, user_id: str) -> list[dict]:
-        if user_id not in self._histories:
-            if self.memory:
-                self._histories[user_id] = self.memory.get_llm_history(user_id)
-                if self._histories[user_id]:
-                    logger.info(f"loaded {len(self._histories[user_id])} history messages for {user_id}")
+        with self._history_lock:
+            if user_id in self._histories:
+                self._histories.move_to_end(user_id)
             else:
-                self._histories[user_id] = []
-        return self._histories[user_id]
+                if self.memory:
+                    self._histories[user_id] = self.memory.get_llm_history(user_id)
+                    if self._histories[user_id]:
+                        logger.info(f"loaded {len(self._histories[user_id])} history messages for {user_id}")
+                else:
+                    self._histories[user_id] = []
+                while len(self._histories) > self._max_history_users:
+                    evicted_id, _ = self._histories.popitem(last=False)
+                    logger.info(f"evicted history for user {evicted_id} (max users={self._max_history_users})")
+            return self._histories[user_id]
 
     def _trim_history(self, user_id: str):
-        history = self._histories.get(user_id, [])
-        if len(history) > self.max_history * 2:
-            self._histories[user_id] = history[-(self.max_history * 2):]
-        if self.memory:
-            self.memory.save_llm_history(user_id, self._histories.get(user_id, []))
+        with self._history_lock:
+            history = self._histories.get(user_id, [])
+            if len(history) > self.max_history * 2:
+                self._histories[user_id] = history[-(self.max_history * 2):]
+            if self.memory:
+                self.memory.save_llm_history(user_id, self._histories.get(user_id, []))
 
     def chat(
         self,
@@ -159,6 +170,8 @@ class LLMEngine:
 
         messages = self._merge_system_messages(messages)
 
+        actual_model = model_override or self.model
+        logger.info(f"LLM request: model={actual_model} multimodal={is_multimodal} streaming={use_streaming} msg_count={len(messages)}")
         try:
             if use_streaming:
                 reply = self._create_streaming_completion(messages, task="chat", model_override=model_override)
@@ -166,18 +179,20 @@ class LLMEngine:
                 response = self._create_chat_completion(messages, task="chat", model_override=model_override)
                 reply = response.choices[0].message.content or ""
             if record_history:
-                history.append({"role": "user", "content": self._build_history_user_content(user_message, files)})
-                history.append({"role": "assistant", "content": reply})
-                self._trim_history(user_id)
+                with self._history_lock:
+                    history.append({"role": "user", "content": self._build_history_user_content(user_message, files)})
+                    history.append({"role": "assistant", "content": reply})
+                    self._trim_history(user_id)
             return reply
         except Exception as e:
             logger.error(f"LLM call failed: {e}")
             return replies.LLM_ERROR
 
     def clear_history(self, user_id: str):
-        self._histories.pop(user_id, None)
-        if self.memory:
-            self.memory.save_llm_history(user_id, [])
+        with self._history_lock:
+            self._histories.pop(user_id, None)
+            if self.memory:
+                self.memory.save_llm_history(user_id, [])
 
     def summarize_large_file(self, user_id: str, user_message: str, file_ctx: Any) -> Any:
         chunks = self._chunk_text(file_ctx.content, self.chunk_tokens)
@@ -334,9 +349,7 @@ class LLMEngine:
             kwargs["extra_body"] = extra_body
 
         if self.stream:
-            kwargs["stream"] = True
-        if self.stream and self.include_usage:
-            kwargs["stream_options"] = {"include_usage": True}
+            return self._create_streaming_completion(messages, task, model_override)
 
         started = time.time()
         response = self.client.chat.completions.create(**kwargs)

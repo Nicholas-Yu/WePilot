@@ -5,6 +5,7 @@ import os
 import random
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 
 import httpx
@@ -15,16 +16,17 @@ ILINK_BASE = "https://ilinkai.weixin.qq.com"
 
 
 class ILinkClient:
-    def __init__(self, config_path: str = "session.json"):
+    def __init__(self, config_path: str = "session.json", channel_version: str = "2.1.10"):
         self.base = ILINK_BASE
         self.token: str = ""
         self.bot_id: str = ""
         self.user_id: str = ""
         self.api_base_url: str = ILINK_BASE
         self._cursor: str = ""
-        self._context_tokens: dict[str, str] = {}
+        self._context_tokens: OrderedDict[str, str] = OrderedDict()
+        self._context_tokens_max = 200
         self.config_path = Path(config_path)
-        self.channel_version = "2.1.10"
+        self.channel_version = channel_version
 
         self._load_session()
 
@@ -37,7 +39,7 @@ class ILinkClient:
                 self.user_id = cfg.get("ilink_user_id", "")
                 self.api_base_url = cfg.get("api_base_url", ILINK_BASE)
                 self._cursor = cfg.get("cursor", "")
-                self._context_tokens = cfg.get("context_tokens", {})
+                self._context_tokens = OrderedDict(cfg.get("context_tokens", {}))
                 logger.info(f"session loaded: bot_id={self.bot_id}")
             except Exception as e:
                 logger.warning(f"session load failed: {e}")
@@ -111,8 +113,9 @@ class ILinkClient:
         return headers
 
     def _post(self, endpoint: str, body: dict, timeout: float = 35) -> dict:
-        body["base_info"] = {"channel_version": self.channel_version}
-        raw = json.dumps(body, ensure_ascii=False)
+        payload = dict(body)
+        payload["base_info"] = {"channel_version": self.channel_version}
+        raw = json.dumps(payload, ensure_ascii=False)
         headers = self._post_headers(raw)
         url = f"{self.api_base_url}/ilink/bot/{endpoint}"
         try:
@@ -129,7 +132,7 @@ class ILinkClient:
             raise
 
     def _get(self, endpoint: str, timeout: float = 40) -> dict:
-        url = f"{ILINK_BASE}/{endpoint}"
+        url = self.absolute_url(endpoint)
         headers = self._get_headers()
         try:
             resp = httpx.get(url, headers=headers, timeout=timeout)
@@ -152,7 +155,7 @@ class ILinkClient:
         endpoint = f"ilink/bot/get_qrcode_status?qrcode={qrcode_key}"
         return self._get(endpoint)
 
-    def login(self) -> bool:
+    def login(self, timeout: int = 300) -> bool:
         logger.info("starting QR login...")
         qr = self.login_qr()
         qrcode_key = qr["qrcode_key"]
@@ -174,7 +177,14 @@ class ILinkClient:
         except ImportError:
             print("(安装 qrcode 库可显示终端二维码: pip install qrcode)")
 
+        start_time = time.time()
         while True:
+            elapsed = time.time() - start_time
+            if elapsed > timeout:
+                logger.error(f"QR login timed out after {timeout}s")
+                print(f"\n登录超时（{timeout // 60} 分钟），请重试。")
+                return False
+
             status = self.poll_qr_status(qrcode_key)
             s = status.get("status", "wait")
 
@@ -199,6 +209,7 @@ class ILinkClient:
                     logger.error("failed to refresh QR code")
                     return False
                 print(f"\n新二维码链接：{qrcode_url}\n")
+                start_time = time.time()
             elif s == "scaned_but_redirect":
                 redirect_host = status.get("redirect_host", "")
                 if redirect_host:
@@ -219,7 +230,11 @@ class ILinkClient:
             ct = msg.get("context_token", "")
             from_user = msg.get("from_user_id", "")
             if ct and from_user:
+                if from_user in self._context_tokens:
+                    self._context_tokens.move_to_end(from_user)
                 self._context_tokens[from_user] = ct
+                while len(self._context_tokens) > self._context_tokens_max:
+                    self._context_tokens.popitem(last=False)
         if msgs or self._cursor:
             self._save_session()
         return msgs

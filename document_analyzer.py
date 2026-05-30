@@ -76,9 +76,10 @@ class DocumentAnalyzer:
         return json.dumps(data, ensure_ascii=False, indent=2)
 
     def _read_csv(self, path: Path) -> str:
-        text = self._read_text(path)
-        rows = list(csv.reader(text.splitlines()))
-        preview = rows[:80]
+        import itertools
+        with open(path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            preview = list(itertools.islice(reader, 80))
         return "\n".join("\t".join(cell for cell in row) for row in preview)
 
     def _read_pdf(self, path: Path) -> str:

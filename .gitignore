@@ -1,12 +1,51 @@
+# 运行时敏感文件
 session.json
+sessions/
 config.json
 .env
-__pycache__
+
+# Python
+__pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 数据目录
 data/uploads/
 data/debug_messages/
 data/memory/
 data/bot.log
+data/bot.log.*
 data/bot.pid
+data/bot.lock
+
+# 日志
+*.log
+
+# 测试 & 覆盖率
+.pytest_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 操作系统
 .DS_Store
+Thumbs.db
+
+# 用户自定义技能（按需取消注释）
 user_skills/media-data-analyst/

@@ -4,6 +4,18 @@
 
 An intelligent chatbot based on the WeChat iLink platform, supporting multimodal understanding (image/audio/video), multi-format document parsing, large file chunked summarization, persistent conversation memory, and an extensible skill system.
 
+## Motivation
+
+WeChat has officially launched the ClawBot plugin, enabling OpenClaw to work directly within WeChat. However, in practice, OpenClaw has two notable issues: frequent version updates that introduce compatibility and stability problems, and a product direction that increasingly leans toward heavy feature stacking, requiring a certain level of professional knowledge to use effectively — creating a significant gap with how average users understand and expect agents to work.
+
+WePilot is born from personal needs, taking a different path — a **lightweight WeChat AI assistant** focused on:
+
+- **Document Processing**: Quickly parse and analyze various documents within WeChat
+- **Data Analysis**: Simple yet practical data analysis and summarization
+- **Multimodal Understanding**: Handle images, audio, and video on demand
+
+These capabilities cover **80% of daily use cases** for the average user. No complex frameworks or heavy dependencies — ready to use out of the box, stable and reliable.
+
 ## Features
 
 - **WeChat Messaging**: Long-polling message reception via iLink Bot API, QR code login support
@@ -20,6 +32,7 @@ An intelligent chatbot based on the WeChat iLink platform, supporting multimodal
 - **Video URL Extraction**: Automatic detection and analysis of video links in text
 - **Friendly Prompts**: Intelligent prompts showing available features and configuration methods when models are not configured
 - **Long Reply Segmentation**: Automatic segmentation of long replies, or summary generation for user selection
+- **Multi-Account Sharing**: Multiple WeChat accounts online simultaneously, sharing heavy resources like LLM engine and skill system, with conversation memory and session state isolated per account
 
 ## Architecture
 
@@ -221,6 +234,69 @@ enabled: true
 
 Define workflow, output format, notes, etc. here.
 ```
+
+## Multi-Account Sharing
+
+WePilot supports multiple WeChat accounts running simultaneously, adopting a **"share heavy resources, isolate light state"** architecture design.
+
+### Architecture Overview
+
+```
+BotManager (Controller)
+  ├── Shared Resource Pool (created once, reused by all accounts)
+  │     ├── MessageParser
+  │     ├── DocumentAnalyzer
+  │     ├── LLMEngine
+  │     ├── SkillRuntime
+  │     ├── MemoryStore
+  │     ├── AttachmentStore
+  │     └── Dedup tables + Thread locks
+  │
+  ├── WeChatBot[Account A]  ──→  Thread 1 (independent iLink session)
+  ├── WeChatBot[Account B]  ──→  Thread 2 (independent iLink session)
+  └── WeChatBot[Account C]  ──→  Thread 3 (independent iLink session)
+```
+
+### Sharing & Isolation Strategy
+
+| Category | Components | Strategy |
+|----------|-----------|----------|
+| Stateless Services | MessageParser, DocumentAnalyzer, SkillRuntime | Shared across all accounts, naturally thread-safe |
+| Stateful Services | MemoryStore, AttachmentStore, LLMEngine | Shared instances, data isolated via user_id key prefix |
+| Read-only Config | max_chat_chars, split_delay, etc. | Determined at startup, immutable at runtime |
+| Independent State | iLink session, pending reports, attachment buffer | Exclusive per account, no cross-contamination |
+
+### Data Isolation
+
+- **Conversation Memory**: Isolated via `{account_id}:{user_id}` key prefix — the same user messaging different bot accounts maintains completely separate memories
+- **File Storage**: Upload directories organized by user_id, naturally isolated across accounts
+- **Message Deduplication**: Dedup tables shared across accounts (prevents duplicate processing in group chat scenarios), with account_id prefix in fingerprint calculation to avoid false matches
+
+### Account Management
+
+```bash
+python3 bot.py --add        # Scan QR code to add a new account
+python3 bot.py --list       # List all configured accounts
+python3 bot.py --remove ID  # Remove a specific account
+```
+
+Account session files are stored in the `sessions/` directory, with each `.json` file representing a logged-in WeChat account. On startup, all accounts are automatically discovered and each is assigned a daemon thread. When no multi-account setup is detected, the system gracefully falls back to single-account mode with no additional configuration needed.
+
+### Configuration Hierarchy
+
+| Layer | Scope | Description |
+|-------|-------|-------------|
+| `.env` | Global shared | LLM API Key, iLink base config, and other sensitive info |
+| `config.json` | Global shared | LLM parameters, file processing strategies, skill config, etc. |
+| `sessions/{id}.json` | Per-account | bot_token, bot_id, user_id, cursor, and other session state |
+
+### Thread Safety
+
+When multiple accounts concurrently access shared resources, thread safety is ensured through:
+
+- Message dedup table and content fingerprint table each hold independent `threading.Lock`
+- MemoryStore allocates a dedicated `RLock` per user_id (user-level lock granularity)
+- LLMEngine history is protected by `threading.RLock`
 
 ## Project Structure
 
