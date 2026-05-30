@@ -1,6 +1,7 @@
 import hashlib
 import json
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -21,66 +22,79 @@ class MemoryStore:
         self.max_relevant_chunks = max_relevant_chunks
         self.max_summary_chars = max_summary_chars
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self._user_locks: dict[str, threading.RLock] = {}
+        self._user_locks_meta = threading.Lock()
+
+    def _get_user_lock(self, user_id: str) -> threading.RLock:
+        with self._user_locks_meta:
+            if user_id not in self._user_locks:
+                self._user_locks[user_id] = threading.RLock()
+            return self._user_locks[user_id]
 
     def get(self, user_id: str) -> dict[str, Any]:
-        path = self._path(user_id)
-        if not path.exists():
-            return self._empty()
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            data.setdefault("recent_turns", [])
-            data.setdefault("dialogue_summary", "")
-            data.setdefault("active_files", [])
-            data.setdefault("llm_history", [])
-            return data
-        except Exception:
-            return self._empty()
+        with self._get_user_lock(user_id):
+            path = self._path(user_id)
+            if not path.exists():
+                return self._empty()
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                data.setdefault("recent_turns", [])
+                data.setdefault("dialogue_summary", "")
+                data.setdefault("active_files", [])
+                data.setdefault("llm_history", [])
+                return data
+            except Exception:
+                return self._empty()
 
     def save(self, user_id: str, memory: dict[str, Any]) -> None:
-        path = self._path(user_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(memory, ensure_ascii=False, indent=2), encoding="utf-8")
+        with self._get_user_lock(user_id):
+            path = self._path(user_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(memory, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def add_turn(self, user_id: str, user_message: str, assistant_reply: str, files: Optional[list[Any]] = None) -> None:
-        memory = self.get(user_id)
-        memory["recent_turns"].append({
-            "user": user_message,
-            "assistant": assistant_reply,
-            "files": [self._file_turn_summary(file_ctx) for file_ctx in (files or [])],
-            "created_at": int(time.time()),
-        })
-        if len(memory["recent_turns"]) > self.max_recent_turns:
-            overflow = memory["recent_turns"][:-self.max_recent_turns]
-            memory["dialogue_summary"] = self._append_summary(memory.get("dialogue_summary", ""), overflow)
-            memory["recent_turns"] = memory["recent_turns"][-self.max_recent_turns:]
-        memory["updated_at"] = int(time.time())
-        self.save(user_id, memory)
+        with self._get_user_lock(user_id):
+            memory = self.get(user_id)
+            memory["recent_turns"].append({
+                "user": user_message,
+                "assistant": assistant_reply,
+                "files": [self._file_turn_summary(file_ctx) for file_ctx in (files or [])],
+                "created_at": int(time.time()),
+            })
+            if len(memory["recent_turns"]) > self.max_recent_turns:
+                overflow = memory["recent_turns"][:-self.max_recent_turns]
+                memory["dialogue_summary"] = self._append_summary(memory.get("dialogue_summary", ""), overflow)
+                memory["recent_turns"] = memory["recent_turns"][-self.max_recent_turns:]
+            memory["updated_at"] = int(time.time())
+            self.save(user_id, memory)
 
     def add_active_file(self, user_id: str, file_ctx: Any, chunk_summaries: Optional[list[str]] = None) -> dict[str, Any]:
-        memory = self.get(user_id)
-        file_record = self._file_record(file_ctx, chunk_summaries or [])
-        files = [item for item in memory.get("active_files", []) if item.get("file_id") != file_record["file_id"]]
-        files.insert(0, file_record)
-        memory["active_files"] = files[: self.max_active_files]
-        memory["updated_at"] = int(time.time())
-        self.save(user_id, memory)
-        return file_record
+        with self._get_user_lock(user_id):
+            memory = self.get(user_id)
+            file_record = self._file_record(file_ctx, chunk_summaries or [])
+            files = [item for item in memory.get("active_files", []) if item.get("file_id") != file_record["file_id"]]
+            files.insert(0, file_record)
+            memory["active_files"] = files[: self.max_active_files]
+            memory["updated_at"] = int(time.time())
+            self.save(user_id, memory)
+            return file_record
 
     def build_context(self, user_id: str, user_message: str, include_active_file: bool = True) -> list[dict[str, str]]:
-        memory = self.get(user_id)
-        messages = []
-        if memory.get("dialogue_summary"):
-            messages.append({"role": "system", "content": f"此前对话摘要：{memory['dialogue_summary']}"})
+        with self._get_user_lock(user_id):
+            memory = self.get(user_id)
+            messages = []
+            if memory.get("dialogue_summary"):
+                messages.append({"role": "system", "content": f"此前对话摘要：{memory['dialogue_summary']}"})
 
-        if include_active_file:
-            file_context = self._active_file_prompt(memory, user_message)
-            if file_context:
-                messages.append({"role": "system", "content": file_context})
+            if include_active_file:
+                file_context = self._active_file_prompt(memory, user_message)
+                if file_context:
+                    messages.append({"role": "system", "content": file_context})
 
-        for turn in memory.get("recent_turns", [])[-self.max_recent_turns:]:
-            messages.append({"role": "user", "content": turn.get("user", "")})
-            messages.append({"role": "assistant", "content": turn.get("assistant", "")})
-        return messages
+            for turn in memory.get("recent_turns", [])[-self.max_recent_turns:]:
+                messages.append({"role": "user", "content": turn.get("user", "")})
+                messages.append({"role": "assistant", "content": turn.get("assistant", "")})
+            return messages
 
     def _active_file_prompt(self, memory: dict[str, Any], user_message: str) -> str:
         active_files = memory.get("active_files", [])
@@ -191,11 +205,13 @@ class MemoryStore:
         }
 
     def get_llm_history(self, user_id: str) -> list[dict[str, str]]:
-        memory = self.get(user_id)
-        return memory.get("llm_history", [])
+        with self._get_user_lock(user_id):
+            memory = self.get(user_id)
+            return memory.get("llm_history", [])
 
     def save_llm_history(self, user_id: str, history: list[dict[str, str]]) -> None:
-        memory = self.get(user_id)
-        memory["llm_history"] = history
-        memory["updated_at"] = int(time.time())
-        self.save(user_id, memory)
+        with self._get_user_lock(user_id):
+            memory = self.get(user_id)
+            memory["llm_history"] = history
+            memory["updated_at"] = int(time.time())
+            self.save(user_id, memory)

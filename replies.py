@@ -59,3 +59,13 @@ UPLOAD_TOO_LARGE = "这个文件有点大（{size:.1f}MB），目前最多支持
 DANGEROUS_COMMAND_BLOCKED = "⚠️ 检测到潜在的危险操作，已拦截。\n\n为了安全起见，系统不允许执行删除、清除等危险命令。如果你需要管理自己的聊天记录，请使用微信客户端的删除功能。\n\n我只能帮你分析文件、回答问题，不能执行系统命令哦～"
 
 INJECTION_ATTEMPT_BLOCKED = "⚠️ 检测到异常输入，已拦截。\n\n请不要尝试注入代码或执行系统命令，这可能会影响系统安全。\n\n有什么我可以帮你的吗？"
+
+MULTIMODAL_RECEIVED_IMAGE = "图片收到啦～你想让我帮你看看什么？比如描述内容、提取文字、分析图表等，告诉我你的需求就好～"
+
+MULTIMODAL_RECEIVED_AUDIO = "音频收到啦～你想让我帮你做什么？比如转文字、总结内容、翻译等，告诉我你的需求就好～"
+
+MULTIMODAL_RECEIVED_VIDEO = "视频收到啦～你想让我帮你做什么？比如总结内容、提取关键画面等，告诉我你的需求就好～"
+
+MULTIMODAL_RECEIVED_MULTI = "文件都收到啦～你想让我帮你做什么分析？告诉我具体需求就好～"
+
+MULTIMODAL_AUTO_ANALYZE = "看你还没说具体要求，我先帮你看看这些内容哈～如果有其他想了解的，随时告诉我～"

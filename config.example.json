@@ -100,5 +100,11 @@
   "bot": {
     "ilink_base_url": "https://ilinkai.weixin.qq.com",
     "channel_version": "2.1.10"
+  },
+  "logging": {
+    "level": "INFO",
+    "max_bytes": 10485760,
+    "backup_count": 3,
+    "encoding": "utf-8"
   }
 }

@@ -6,6 +6,35 @@ from typing import Any, List, Optional
 
 logger = logging.getLogger("skills")
 
+TRUSTED_DIRS = {"skills"}
+UNTRUSTED_MAX_BODY_CHARS = 16000
+UNTRUSTED_MAX_BODY_TOKENS = 4000
+
+_INJECTION_PATTERNS = [
+    re.compile(r"ignore\s+(all\s+)?previous\s+instructions?", re.IGNORECASE),
+    re.compile(r"disregard\s+(all\s+)?previous", re.IGNORECASE),
+    re.compile(r"forget\s+(all\s+)?previous", re.IGNORECASE),
+    re.compile(r"override\s+(the\s+)?system\s+prompt", re.IGNORECASE),
+    re.compile(r"you\s+are\s+now\s+(a|an)\s+", re.IGNORECASE),
+    re.compile(r"your\s+new\s+role\s+is", re.IGNORECASE),
+    re.compile(r"act\s+as\s+if\s+you\s+are", re.IGNORECASE),
+    re.compile(r"pretend\s+(to\s+be|you\s+are)", re.IGNORECASE),
+    re.compile(r"忽略(之前|以上|所有|前面).*(指令|规则|设定|要求)", re.IGNORECASE),
+    re.compile(r"无视(之前|以上|所有|前面).*(指令|规则|设定|要求)", re.IGNORECASE),
+    re.compile(r"覆盖(系统|之前|以上).*(指令|规则|设定|要求)", re.IGNORECASE),
+    re.compile(r"你现在(是|扮演|变成)", re.IGNORECASE),
+    re.compile(r"你的新(角色|身份|任务)是", re.IGNORECASE),
+    re.compile(r"不要(遵循|遵守|执行)(之前|以上|系统)", re.IGNORECASE),
+]
+
+_CODE_BLOCK_PATTERN = re.compile(r"```[\s\S]*?```")
+
+_IMPORT_PATTERN = re.compile(
+    r"\b(import\s+os|import\s+sys|import\s+subprocess|from\s+os|from\s+sys|from\s+subprocess|"
+    r"eval\s*\(|exec\s*\(|__import__|os\.system|os\.popen|"
+    r"subprocess\.(run|call|Popen|check_output))\b"
+)
+
 
 @dataclass
 class Skill:
@@ -17,6 +46,7 @@ class Skill:
     intents: list[str] = field(default_factory=list)
     priority: int = 50
     enabled: bool = True
+    trusted: bool = True
 
 
 class SkillRuntime:
@@ -30,15 +60,23 @@ class SkillRuntime:
         for base_dir in self.skill_dirs:
             if not base_dir.exists():
                 continue
+            is_trusted = base_dir.name in TRUSTED_DIRS
             for skill_md in sorted(base_dir.glob("*/SKILL.md")):
                 try:
-                    skill = self._load_skill(skill_md)
+                    skill = self._load_skill(skill_md, trusted=is_trusted)
                     if skill.enabled:
                         skills.append(skill)
+                        logger.info(
+                            "skill loaded: %s (trusted=%s, body=%d chars, dir=%s)",
+                            skill.name, skill.trusted, len(skill.body), base_dir.name,
+                        )
                 except Exception as exc:
                     logger.warning("failed to load skill %s: %s", skill_md, exc)
         skills.sort(key=lambda skill: skill.priority, reverse=True)
-        logger.info("loaded %s skills", len(skills))
+        logger.info("loaded %s skills (%s trusted, %s untrusted)",
+                     len(skills),
+                     sum(1 for s in skills if s.trusted),
+                     sum(1 for s in skills if not s.trusted))
         return skills
 
     def select(self, user_message: str, files: Optional[List[Any]] = None) -> list[Skill]:
@@ -70,13 +108,17 @@ class SkillRuntime:
             sections.append(f"\n--- Skill: {skill.name} ---\n{skill.body.strip()}")
         return "\n".join(sections)
 
-    def _load_skill(self, skill_md: Path) -> Skill:
+    def _load_skill(self, skill_md: Path, trusted: bool = True) -> Skill:
         raw = skill_md.read_text(encoding="utf-8")
         meta, body = self._parse_frontmatter(raw)
         name = str(meta.get("name", skill_md.parent.name)).strip()
         description = str(meta.get("description", "")).strip()
         if not name or not description:
             raise ValueError("SKILL.md must include name and description")
+
+        if not trusted:
+            body = self._sanitize_body(body, name)
+
         return Skill(
             name=name,
             description=description,
@@ -86,7 +128,39 @@ class SkillRuntime:
             intents=self._list_meta(meta.get("intents", [])),
             priority=int(meta.get("priority", 50)),
             enabled=str(meta.get("enabled", "true")).lower() != "false",
+            trusted=trusted,
         )
+
+    def _sanitize_body(self, body: str, skill_name: str) -> str:
+        original_len = len(body)
+        injection_hits = []
+        for pattern in _INJECTION_PATTERNS:
+            matches = pattern.findall(body)
+            if matches:
+                injection_hits.append(pattern.pattern)
+                body = pattern.sub("[已移除: 疑似注入指令]", body)
+
+        if injection_hits:
+            logger.warning(
+                "skill '%s': removed %d injection pattern(s): %s",
+                skill_name, len(injection_hits), "; ".join(injection_hits),
+            )
+
+        code_blocks = _CODE_BLOCK_PATTERN.findall(body)
+        if code_blocks:
+            for block in code_blocks:
+                if _IMPORT_PATTERN.search(block):
+                    body = body.replace(block, "[已移除: 包含危险代码]")
+                    logger.warning("skill '%s': removed dangerous code block", skill_name)
+
+        if len(body) > UNTRUSTED_MAX_BODY_CHARS:
+            body = body[:UNTRUSTED_MAX_BODY_CHARS] + "\n\n[内容已截断: 超过最大字符限制]"
+            logger.warning(
+                "skill '%s': body truncated from %d to %d chars",
+                skill_name, original_len, UNTRUSTED_MAX_BODY_CHARS,
+            )
+
+        return body
 
     def _parse_frontmatter(self, raw: str) -> tuple[dict[str, Any], str]:
         if not raw.startswith("---"):
