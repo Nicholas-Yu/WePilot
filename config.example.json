@@ -1,0 +1,104 @@
+{
+  "llm": {
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "api_key": "",
+    "model": "deepseek-v4-pro",
+    "enable_search": true,
+    "bot_name": "AI助手",
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "presence_penalty": 0,
+    "frequency_penalty": 0,
+    "seed": null,
+    "max_tokens": 512,
+    "max_history": 10,
+    "reply_style": "concise",
+    "context_window_tokens": 1000000,
+    "request_timeout": 120,
+    "max_retries": 2,
+    "stream": false,
+    "include_usage": true
+  },
+  "dashscope": {
+    "extra_body": {
+      "enable_search": false,
+      "enable_thinking": false,
+      "thinking_budget": null
+    }
+  },
+  "task_profiles": {
+    "default": {
+      "top_p": 0.9,
+      "presence_penalty": 0,
+      "frequency_penalty": 0
+    },
+    "chat": {
+      "temperature": 0.7,
+      "top_p": 0.9,
+      "max_tokens": 1000,
+      "enable_search": "auto"
+    },
+    "file_analysis": {
+      "temperature": 0.2,
+      "top_p": 0.8,
+      "max_tokens": 8192,
+      "enable_search": false
+    },
+    "chunk_summary": {
+      "temperature": 0.2,
+      "top_p": 0.8,
+      "max_tokens": 2048,
+      "enable_search": false
+    },
+    "memory_summary": {
+      "temperature": 0.1,
+      "top_p": 0.8,
+      "max_tokens": 8192,
+      "enable_search": false
+    }
+  },
+  "files": {
+    "max_upload_mb": 200,
+    "reserved_prompt_tokens": 150000,
+    "max_file_tokens": 850000,
+    "max_total_file_tokens": 850000,
+    "large_file_strategy": "chunk_summary",
+    "chunk_tokens": 80000,
+    "chunk_summary_tokens": 2048,
+    "final_summary_tokens": 8192,
+    "max_chunks": 24,
+    "upload_retention_days": 30
+  },
+  "multimodal": {
+    "enabled": true,
+    "provider": "dashscope",
+    "vision_model": "qwen3.6-plus",
+    "audio_model": "qwen3.5-omni-plus",
+    "video_model": "qwen3.5-omni-plus",
+    "video_url_model": "qwen3.6-plus",
+    "max_image_mb": 20,
+    "max_audio_mb": 100,
+    "max_video_mb": 300
+  },
+  "memory": {
+    "base_dir": "data/memory",
+    "max_recent_turns": 8,
+    "max_active_files": 3,
+    "max_relevant_chunks": 5,
+    "max_summary_chars": 6000
+  },
+  "reply": {
+    "max_chat_chars": 800,
+    "auto_split_threshold": 2000,
+    "file_output_threshold": 3000,
+    "split_delay_seconds": 0.5
+  },
+  "skills": {
+    "dirs": ["skills", "user_skills"],
+    "max_loaded_skills": 2
+  },
+  "bot": {
+    "ilink_base_url": "https://ilinkai.weixin.qq.com",
+    "channel_version": "2.1.10"
+  }
+}
