@@ -346,9 +346,7 @@ When dangerous commands are detected, the system will:
 
 > **Note**: Users can only perform delete operations in their own chat history, the system will not execute any dangerous commands.
 
-## Open Source
-
-This project supports open source use, users can configure different LLM models as needed:
+## Quick Configuration
 
 ### Minimal Configuration (Text Only)
 
@@ -358,24 +356,12 @@ Only configure the `llm` section to use basic text conversation and document par
 
 Configure the `multimodal` section to enable image/audio/video recognition features. If a model is not configured, the bot will automatically prompt the user with available features and configuration methods.
 
-## Changelog
+## License
 
-### v2.0 (2026-05-30)
+This project is open source under the [MIT License](LICENSE).
 
-- **Added**: Multimodal understanding (image/audio/video recognition)
-- **Added**: Message quoting (support for quoting historical images/videos/audio/text)
-- **Added**: Historical file reference (keyword matching + timestamp matching)
-- **Added**: Automatic video URL extraction and analysis
-- **Added**: Friendly prompts (show available features when models are not configured)
-- **Added**: Long reply segmentation and summary caching
-- **Added**: `replies.py` centralized management of all user-visible replies
-- **Added**: Dangerous command security interception (delete/injection/system command detection)
-- **Optimized**: LLM engine supports multi-model auto-switching
-- **Optimized**: Streaming output support (qwen3.5-omni-plus)
-- **Optimized**: System message auto-merging (compatible with multimodal models)
-- **Optimized**: AES decryption supports ECB/CBC dual modes
-- **Optimized**: Automatic file expiration cleanup
+You are free to:
+- Use, copy, modify, merge, publish, distribute, sublicense, and sell copies of the Software
+- Permit persons to whom the Software is furnished to do so
 
-### v1.0 (2026-05-07)
-
-- Initial release: Text conversation, document parsing, conversation memory, skill system
+The only requirement: include the copyright notice and permission notice in all copies of the Software.
