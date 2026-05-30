@@ -1,0 +1,11 @@
+session.json
+config.json
+.env
+__pycache__
+*.pyc
+data/uploads/
+data/debug_messages/
+data/memory/
+data/bot.log
+data/bot.pid
+.DS_Store
