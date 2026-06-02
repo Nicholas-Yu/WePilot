@@ -6,7 +6,7 @@ An intelligent chatbot based on the WeChat iLink platform, supporting multimodal
 
 ## Motivation
 
-WeChat has officially launched the ClawBot plugin, enabling OpenClaw to work directly within WeChat. However, in practice, OpenClaw has two notable issues: frequent version updates that introduce compatibility and stability problems, and a product direction that increasingly leans toward heavy feature stacking, requiring a certain level of professional knowledge to use effectively — creating a significant gap with how average users understand and expect agents to work.
+WeChat has officially launched the ClawBot plugin, enabling OpenClaw to work directly within WeChat. OpenClaw is a feature-rich Agent framework with rapid iteration and extensive capabilities, well-suited for users with technical backgrounds who want deep customization.
 
 WePilot is born from my own real needs, taking a different path — a **lightweight WeChat AI assistant** focused on:
 

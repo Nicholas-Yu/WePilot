@@ -227,6 +227,10 @@ class WeChatBot:
         self._content_fp_ttl = 10
         self._pending_attachments: dict[str, dict] = {}
         self._pending_attachments_lock = threading.Lock()
+        self._pending_skill_menus: dict[str, dict] = {}
+        self._pending_skill_menus_lock = threading.Lock()
+        self._selected_report_types: dict[str, tuple[str, float]] = {}
+        self._report_type_ttl = 300
         self.attachment_wait_seconds = bot_cfg.get("attachment_wait_seconds", 15)
         self.debug_dir = Path("data/debug_messages")
 
@@ -355,6 +359,8 @@ class WeChatBot:
 
     def _loop(self):
         self.logger.info("listening for messages...")
+        consecutive_failures = 0
+        last_success_time = time.time()
         while self._running:
             try:
                 if time.time() - self._last_cleanup > 86400:
@@ -365,13 +371,35 @@ class WeChatBot:
                 self._flush_pending_attachments()
                 
                 msgs = self.ilink.get_updates()
+                consecutive_failures = 0
+                last_success_time = time.time()
                 if msgs:
                     self.logger.info(f"get_updates returned {len(msgs)} message(s)")
                 for msg in msgs:
-                    self._handle_message(msg)
+                    try:
+                        self._handle_message(msg)
+                    except Exception as msg_err:
+                        self.logger.error(f"message handling error: {msg_err}", exc_info=True)
             except Exception as e:
-                self.logger.error(f"loop error: {e}")
-                time.sleep(5)
+                consecutive_failures += 1
+                self.logger.error(f"loop error ({consecutive_failures}x): {e}")
+                
+                if consecutive_failures >= 5:
+                    gap = time.time() - last_success_time
+                    if gap > 60:
+                        self.logger.warning(
+                            f"network may have been down for {gap:.0f}s, "
+                            f"checking session..."
+                        )
+                        try:
+                            self.ilink.notify_start()
+                            self.logger.info("session recovered after network gap")
+                        except Exception as re_err:
+                            self.logger.error(f"session recovery failed: {re_err}")
+                    consecutive_failures = 0
+                    time.sleep(10)
+                else:
+                    time.sleep(5)
     
     def _memory_key(self, user_id: str) -> str:
         return f"{self.account_id}:{user_id}"
@@ -514,6 +542,11 @@ class WeChatBot:
         )
         selected_skills = self.skills.select(text, file_contexts)
         skill_context = self.skills.build_context(selected_skills)
+
+        skill_context = self._resolve_skill_menus(selected_skills, from_user, text, file_contexts, context_token, skill_context, skip_menu=auto_analyze)
+        if skill_context is None:
+            return
+
         if skill_context:
             context_messages.append({"role": "system", "content": skill_context})
 
@@ -568,7 +601,7 @@ class WeChatBot:
             return
 
         content_fp = self._content_fingerprint(msg)
-        if self._is_content_duplicate(content_fp):
+        if content_fp and self._is_content_duplicate(content_fp):
             self.logger.info(f"content duplicate skipped: {content_fp[:60]}")
             return
 
@@ -618,80 +651,91 @@ class WeChatBot:
             self.ilink.send_message(security_reply, from_user, context_token)
             return
 
-        if self._check_pending_report(from_user, text, context_token):
-            return
+        menu_selection = self._check_menu_selection(from_user, text)
+        is_menu_replay = False
+        if menu_selection:
+            self.logger.info(f"menu selection from {from_user}: {menu_selection['report_type']}")
+            self._set_selected_report_type(from_user, menu_selection["report_type"])
+            text = menu_selection["original_text"]
+            file_contexts = menu_selection["file_contexts"]
+            is_menu_replay = True
+            self.logger.info(f"replaying original request: {repr(text)[:50]}... with {len(file_contexts)} file(s)")
+        else:
+            if self._check_pending_report(from_user, text, context_token):
+                return
 
-        try:
-            config = self.ilink.get_config(from_user, context_token)
-            typing_ticket = config.get("typing_ticket", "")
-            if typing_ticket:
-                self.ilink.send_typing(from_user, typing_ticket)
-        except Exception:
-            pass
+            try:
+                config = self.ilink.get_config(from_user, context_token)
+                typing_ticket = config.get("typing_ticket", "")
+                if typing_ticket:
+                    self.ilink.send_typing(from_user, typing_ticket)
+            except Exception:
+                pass
 
-        file_contexts = self._prepare_files(from_user, parsed)
+            file_contexts = self._prepare_files(from_user, parsed)
         
-        if not file_contexts and parsed.attachments:
-            reply = replies.DOWNLOAD_FAILED
-            self.logger.info(f"reply to {from_user}: {reply[:50]}...")
-            self.ilink.send_message(reply, from_user, context_token)
-            return
-
-        has_explicit_quote = parsed.quoted_text or any(a.is_quoted for a in parsed.attachments) or parsed.quoted_timestamp
-        
-        if not file_contexts and not has_explicit_quote:
-            historical_contexts = self._check_historical_references(from_user, text)
-            if historical_contexts:
-                file_contexts = historical_contexts
-                self.logger.info(f"found {len(file_contexts)} historical file references")
-
-        if not file_contexts and parsed.quoted_timestamp and not quoted_attachments:
-            ts_context = self._find_file_by_timestamp(from_user, parsed.quoted_timestamp)
-            if ts_context:
-                file_contexts = [ts_context]
-                self.logger.info(f"found file by quoted timestamp: {ts_context.filename}")
-
-        unprocessable_files = [ctx for ctx in file_contexts if getattr(ctx, "error", "") and not getattr(ctx, "content", "")]
-        if unprocessable_files:
-            reply = self._build_unprocessable_reply(unprocessable_files)
-            self.logger.info(f"reply to {from_user}: {reply[:50]}...")
-            self.ilink.send_message(reply, from_user, context_token)
-            return
-
-        over_limit_files = [ctx for ctx in file_contexts if getattr(ctx, "over_limit", False)]
-        if over_limit_files:
-            file_contexts = self._summarize_large_files(from_user, text, context_token, file_contexts, over_limit_files)
-            failed_files = [ctx for ctx in file_contexts if getattr(ctx, "error", "").startswith("大文件分块摘要失败") and not getattr(ctx, "content", "")]
-            if failed_files:
-                reply = self._build_unprocessable_reply(failed_files)
+        if not is_menu_replay:
+            if not file_contexts and parsed.attachments:
+                reply = replies.DOWNLOAD_FAILED
                 self.logger.info(f"reply to {from_user}: {reply[:50]}...")
                 self.ilink.send_message(reply, from_user, context_token)
                 return
 
-        total_file_tokens = sum(getattr(ctx, "estimated_tokens", 0) for ctx in file_contexts)
-        if total_file_tokens > self.max_total_file_tokens:
-            file_contexts = self._summarize_large_files(from_user, text, context_token, file_contexts, file_contexts)
-            failed_files = [ctx for ctx in file_contexts if getattr(ctx, "error", "").startswith("大文件分块摘要失败") and not getattr(ctx, "content", "")]
-            if failed_files:
-                reply = self._build_unprocessable_reply(failed_files)
+            has_explicit_quote = parsed.quoted_text or any(a.is_quoted for a in parsed.attachments) or parsed.quoted_timestamp
+            
+            if not file_contexts and not has_explicit_quote:
+                historical_contexts = self._check_historical_references(from_user, text)
+                if historical_contexts:
+                    file_contexts = historical_contexts
+                    self.logger.info(f"found {len(file_contexts)} historical file references")
+
+            if not file_contexts and parsed.quoted_timestamp and not quoted_attachments:
+                ts_context = self._find_file_by_timestamp(from_user, parsed.quoted_timestamp)
+                if ts_context:
+                    file_contexts = [ts_context]
+                    self.logger.info(f"found file by quoted timestamp: {ts_context.filename}")
+
+            unprocessable_files = [ctx for ctx in file_contexts if getattr(ctx, "error", "") and not getattr(ctx, "content", "")]
+            if unprocessable_files:
+                reply = self._build_unprocessable_reply(unprocessable_files)
                 self.logger.info(f"reply to {from_user}: {reply[:50]}...")
                 self.ilink.send_message(reply, from_user, context_token)
                 return
 
-        if file_contexts:
-            file_contexts = self._store_file_memories(from_user, text, file_contexts)
+            over_limit_files = [ctx for ctx in file_contexts if getattr(ctx, "over_limit", False)]
+            if over_limit_files:
+                file_contexts = self._summarize_large_files(from_user, text, context_token, file_contexts, over_limit_files)
+                failed_files = [ctx for ctx in file_contexts if getattr(ctx, "error", "").startswith("大文件分块摘要失败") and not getattr(ctx, "content", "")]
+                if failed_files:
+                    reply = self._build_unprocessable_reply(failed_files)
+                    self.logger.info(f"reply to {from_user}: {reply[:50]}...")
+                    self.ilink.send_message(reply, from_user, context_token)
+                    return
 
-        video_url_ctx = self._extract_video_url(text)
-        if video_url_ctx:
-            file_contexts.append(video_url_ctx)
-            text = self._remove_video_url(text)
+            total_file_tokens = sum(getattr(ctx, "estimated_tokens", 0) for ctx in file_contexts)
+            if total_file_tokens > self.max_total_file_tokens:
+                file_contexts = self._summarize_large_files(from_user, text, context_token, file_contexts, file_contexts)
+                failed_files = [ctx for ctx in file_contexts if getattr(ctx, "error", "").startswith("大文件分块摘要失败") and not getattr(ctx, "content", "")]
+                if failed_files:
+                    reply = self._build_unprocessable_reply(failed_files)
+                    self.logger.info(f"reply to {from_user}: {reply[:50]}...")
+                    self.ilink.send_message(reply, from_user, context_token)
+                    return
 
-        has_video = any(getattr(ctx, "mime_type", "").startswith("video/") for ctx in file_contexts)
-        has_audio = any(getattr(ctx, "mime_type", "").startswith("audio/") for ctx in file_contexts)
-        if has_video:
-            self.ilink.send_message(replies.VIDEO_PROCESSING, from_user, context_token)
-        elif has_audio:
-            self.ilink.send_message(replies.AUDIO_PROCESSING, from_user, context_token)
+            if file_contexts:
+                file_contexts = self._store_file_memories(from_user, text, file_contexts)
+
+            video_url_ctx = self._extract_video_url(text)
+            if video_url_ctx:
+                file_contexts.append(video_url_ctx)
+                text = self._remove_video_url(text)
+
+            has_video = any(getattr(ctx, "mime_type", "").startswith("video/") for ctx in file_contexts)
+            has_audio = any(getattr(ctx, "mime_type", "").startswith("audio/") for ctx in file_contexts)
+            if has_video:
+                self.ilink.send_message(replies.VIDEO_PROCESSING, from_user, context_token)
+            elif has_audio:
+                self.ilink.send_message(replies.AUDIO_PROCESSING, from_user, context_token)
 
         mem_key = self._memory_key(from_user)
         context_messages = self.memory.build_context(
@@ -701,6 +745,11 @@ class WeChatBot:
         )
         selected_skills = self.skills.select(text, file_contexts)
         skill_context = self.skills.build_context(selected_skills)
+
+        skill_context = self._resolve_skill_menus(selected_skills, from_user, text, file_contexts, context_token, skill_context)
+        if skill_context is None:
+            return
+
         if skill_context:
             context_messages.append({"role": "system", "content": skill_context})
         has_multimodal_files = any(getattr(ctx, "base64_data", "") or getattr(ctx, "source_url", "") for ctx in file_contexts)
@@ -752,8 +801,30 @@ class WeChatBot:
             return []
         
         text_lower = text.lower()
-        reference_keywords = ["这个", "那个", "刚才", "之前", "上次", "前面", "之前发", "刚才发", "分析", "总结", "看看", "看下"]
-        if not any(kw in text_lower for kw in reference_keywords):
+        strong_patterns = [
+            "这个文件", "那个文件", "刚才的文件", "之前的文件", "上次的文件",
+            "这个文档", "那个文档", "刚才的文档", "之前的文档",
+            "这个报告", "那个报告", "刚才的报告",
+            "这个视频", "那个视频", "刚才的视频",
+            "这个图片", "那个图片", "刚才的图片",
+            "这个音频", "那个音频", "刚才的音频",
+            "这个PPT", "那个PPT", "这个Excel", "那个Excel",
+            "这个Word", "那个Word", "这个PDF", "那个PDF",
+            "刚才发的", "之前发的", "上次发的", "前面发的",
+            "刚才那个", "之前那个", "上次那个",
+        ]
+        ref_words = ["这个", "那个", "刚才", "之前", "上次", "前面"]
+        file_words = [
+            "文件", "文档", "报告", "视频", "图片", "音频",
+            "ppt", "pptx", "excel", "xlsx", "word", "docx", "pdf",
+            "csv", "txt",
+        ]
+        has_strong = any(p in text_lower for p in strong_patterns)
+        has_weak = (
+            any(r in text_lower for r in ref_words)
+            and any(f in text_lower for f in file_words)
+        )
+        if not has_strong and not has_weak:
             return []
         
         memory = self.memory.get(self._memory_key(user_id))
@@ -1058,6 +1129,126 @@ class WeChatBot:
                 time.sleep(self.split_delay)
         return True
 
+    _MENU_NUMBER_MAP = {"1": 0, "2": 1, "3": 2, "4": 3, "5": 4, "6": 5,
+                        "①": 0, "②": 1, "③": 2, "④": 3, "⑤": 4, "⑥": 5,
+                        "一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5}
+
+    _MENU_TYPE_NAMES = [
+        "快速简报", "标准投资报告", "深度研报",
+        "景气度跟踪", "投委会备忘录", "公司速览",
+    ]
+
+    _MENU_SELECTION_PATTERNS = [
+        (r"选\s*([1-6①-⑥一二三四五六])", 1),
+        (r"第\s*([1-6①-⑥一二三四五六])\s*个", 1),
+        (r"我要\s*([1-6①-⑥一二三四五六])", 1),
+        (r"([1-6①-⑥一二三四五六])\s*号", 1),
+    ]
+
+    def _check_menu_selection(self, from_user: str, text: str) -> Optional[dict]:
+        if not text:
+            return None
+        mem_key = self._memory_key(from_user)
+        with self._pending_skill_menus_lock:
+            pending = self._pending_skill_menus.get(mem_key)
+            if not pending:
+                return None
+            if time.time() - pending["timestamp"] > 300:
+                del self._pending_skill_menus[mem_key]
+                return None
+
+        text_stripped = text.strip()
+        report_type = None
+        selected_idx = None
+
+        if text_stripped in self._MENU_NUMBER_MAP:
+            selected_idx = self._MENU_NUMBER_MAP[text_stripped]
+        else:
+            for pattern, group_idx in self._MENU_SELECTION_PATTERNS:
+                match = re.search(pattern, text_stripped)
+                if match:
+                    num_str = match.group(group_idx)
+                    if num_str in self._MENU_NUMBER_MAP:
+                        selected_idx = self._MENU_NUMBER_MAP[num_str]
+                        break
+
+        if selected_idx is not None and selected_idx < len(self._MENU_TYPE_NAMES):
+            report_type = self._MENU_TYPE_NAMES[selected_idx]
+
+        if not report_type:
+            skill = pending["skill"]
+            report_type = self._match_menu_keyword(text, skill)
+
+        result = None
+        if report_type:
+            result = {
+                "report_type": report_type,
+                "original_text": pending.get("original_text", ""),
+                "file_contexts": pending.get("file_contexts", []),
+                "skill": pending.get("skill"),
+            }
+            with self._pending_skill_menus_lock:
+                self._pending_skill_menus.pop(mem_key, None)
+
+        return result
+
+    def _resolve_skill_menus(self, selected_skills, from_user: str, text: str, file_contexts: list, context_token: str, skill_context: str, skip_menu: bool = False) -> Optional[str]:
+        for skill in selected_skills:
+            if skill.menu:
+                if skip_menu:
+                    skill_context += "\n\n用户已选择报告类型：快速简报。请直接按此类型输出，不要再询问。"
+                else:
+                    report_type = self._get_selected_report_type(from_user)
+                    if report_type:
+                        skill_context += f"\n\n用户已选择报告类型：{report_type}。请直接按此类型输出，不要再询问。"
+                    else:
+                        keyword_type = self._match_menu_keyword(text, skill)
+                        if keyword_type:
+                            skill_context += f"\n\n用户已选择报告类型：{keyword_type}。请直接按此类型输出，不要再询问。"
+                        else:
+                            self.ilink.send_message(skill.menu, from_user, context_token)
+                            self._set_pending_menu(from_user, skill, text, file_contexts)
+                            self.logger.info(f"sent skill menu to {from_user}: {skill.name}")
+                            return None
+        return skill_context
+
+    def _match_menu_keyword(self, text: str, skill) -> Optional[str]:
+        if not text or not skill.menu_keywords:
+            return None
+        text_lower = text.lower()
+        for mapping in skill.menu_keywords:
+            if "=" not in mapping:
+                continue
+            keyword, report_type = mapping.split("=", 1)
+            if keyword.strip().lower() in text_lower:
+                return report_type.strip()
+        return None
+
+    def _set_pending_menu(self, from_user: str, skill, original_text: str, file_contexts: list) -> None:
+        mem_key = self._memory_key(from_user)
+        with self._pending_skill_menus_lock:
+            self._pending_skill_menus[mem_key] = {
+                "skill": skill,
+                "timestamp": time.time(),
+                "original_text": original_text,
+                "file_contexts": file_contexts,
+            }
+
+    def _set_selected_report_type(self, from_user: str, report_type: str) -> None:
+        mem_key = self._memory_key(from_user)
+        self._selected_report_types[mem_key] = (report_type, time.time())
+
+    def _get_selected_report_type(self, from_user: str) -> Optional[str]:
+        mem_key = self._memory_key(from_user)
+        entry = self._selected_report_types.get(mem_key)
+        if not entry:
+            return None
+        report_type, ts = entry
+        if time.time() - ts > self._report_type_ttl:
+            self._selected_report_types.pop(mem_key, None)
+            return None
+        return self._selected_report_types.pop(mem_key)[0]
+
     _VIDEO_URL_PATTERN = re.compile(
         r'https?://[^\s<>"\']+\.(?:mp4|mov|avi|mkv|webm|flv)(?:\?[^\s<>"\']*)?',
         re.IGNORECASE,
@@ -1110,10 +1301,12 @@ class WeChatBot:
     def _content_fingerprint(self, msg: dict) -> str:
         from_user = msg.get("from_user_id", "")
         parts = [from_user]
+        has_media = False
         for item in msg.get("item_list", []):
             item_type = item.get("type")
             if item_type == 1:
                 continue
+            has_media = True
             image_item = item.get("image_item", {})
             video_item = item.get("video_item", {})
             audio_item = item.get("audio_item", {}) or item.get("voice_item", {})
@@ -1121,6 +1314,8 @@ class WeChatBot:
             aes_key = media.get("aes_key", "")
             url = media.get("full_url", "") or media.get("url", "")
             parts.append(f"{item_type}:{aes_key}:{url}")
+        if not has_media:
+            return ""
         raw = f"{self.account_id}:{':'.join(parts)}"
         return hashlib.md5(raw.encode("utf-8")).hexdigest()
 

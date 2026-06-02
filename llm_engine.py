@@ -328,10 +328,11 @@ class LLMEngine:
             ],
             task=task,
             max_tokens=max_tokens,
+            force_no_stream=True,
         )
         return response.choices[0].message.content or ""
 
-    def _create_chat_completion(self, messages: list[dict[str, str]], task: str, max_tokens: Optional[int] = None, model_override: Optional[str] = None):
+    def _create_chat_completion(self, messages: list[dict[str, str]], task: str, max_tokens: Optional[int] = None, model_override: Optional[str] = None, force_no_stream: bool = False):
         profile = self._profile(task)
         kwargs = {
             "model": model_override or profile.get("model", self.model),
@@ -348,7 +349,7 @@ class LLMEngine:
         if extra_body:
             kwargs["extra_body"] = extra_body
 
-        if self.stream:
+        if self.stream and not force_no_stream:
             return self._create_streaming_completion(messages, task, model_override)
 
         started = time.time()

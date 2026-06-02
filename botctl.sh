@@ -22,7 +22,7 @@ case "${1:-}" in
         pid=$(get_pid) && echo "机器人已在运行 (PID: $pid)" && exit 0
         echo "启动机器人（防休眠模式）..."
         cd "$BOT_DIR"
-        nohup caffeinate -s python3 bot.py > /dev/null 2>&1 &
+        nohup caffeinate -dims python3 bot.py > /dev/null 2>&1 &
         sleep 2
         pid=$(get_pid) && echo "启动成功 (PID: $pid)" || echo "启动失败，请查看日志: $LOG_FILE"
         ;;

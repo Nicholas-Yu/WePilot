@@ -47,6 +47,8 @@ class Skill:
     priority: int = 50
     enabled: bool = True
     trusted: bool = True
+    menu: str = ""
+    menu_keywords: list[str] = field(default_factory=list)
 
 
 class SkillRuntime:
@@ -119,6 +121,9 @@ class SkillRuntime:
         if not trusted:
             body = self._sanitize_body(body, name)
 
+        menu_raw = str(meta.get("menu", "")).strip()
+        menu_text = menu_raw.replace("\\n", "\n") if menu_raw else ""
+
         return Skill(
             name=name,
             description=description,
@@ -129,6 +134,8 @@ class SkillRuntime:
             priority=int(meta.get("priority", 50)),
             enabled=str(meta.get("enabled", "true")).lower() != "false",
             trusted=trusted,
+            menu=menu_text,
+            menu_keywords=self._parse_menu_keywords(meta.get("menu_keywords", [])),
         )
 
     def _sanitize_body(self, body: str, skill_name: str) -> str:
@@ -222,4 +229,11 @@ class SkillRuntime:
             return [str(item).strip().lower() for item in value if str(item).strip()]
         if isinstance(value, str):
             return [item.strip().lower() for item in value.split(",") if item.strip()]
+        return []
+
+    def _parse_menu_keywords(self, value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
         return []
